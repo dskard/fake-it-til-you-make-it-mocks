@@ -1,0 +1,36 @@
+[tool.poetry]
+name = "fake-it-til-you-make-it-mocks"
+version = "0.1.0"
+description = ""
+authors = ["dskard"]
+license = "MIT"
+readme = "README.md"
+packages = [{include = "fake-it-til-you-make-it-mocks", from = "src"},]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+manageritm = "^0.1.0"
+gunicorn = "^20.1.0"
+
+[tool.poetry.group.dev.dependencies]
+black = "^23.1.0"
+pytest = "^7.2.1"
+pdbpp = "^0.10.3"
+python-semantic-release = "^7.33.1"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.semantic_release]
+version_variable = [
+    "src/fake-it-til-you-make-it-mocks/__init__.py:__version__"
+]
+version_toml = [
+    "pyproject.toml:tool.poetry.version"
+]
+major_on_zero = false
+branch = "main"
+upload_to_PyPI = true
+upload_to_release = true
+build_command = "pip install poetry && poetry build"

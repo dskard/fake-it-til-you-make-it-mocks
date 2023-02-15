@@ -1,0 +1,383 @@
+---
+title: "Fake it 'til you make it - Mocks!"
+execute:
+  eval: false
+format:
+  html:
+    toc: true
+    code-line-numbers: true
+editor: 
+  markdown: 
+    wrap: 72
+engine: knitr
+---
+
+```{r}
+```
+
+## What are Mocks?
+
+In software, a mock is an object that acts as a stand in for a real object or service. It may mostly look and act like the real object but in most cases it doesnt implement all of the features of the real object. Mocks can be used when testing a feature that doesn't need the real object or service as long as the real object or service honors its side of the communication contract.
+
+Mocks allow us to test pieces of a system in isolation
+
+Testing with mocks is like a game of telephone. Usually when you write unit tests, there are two players:
+```
+you  <--->  function under test
+```
+
+Sometimes, the function under test relies on other functions or services:
+```
+you  <--->  function under test  <--->  service
+you  <--->  function under test  <--->  another function
+```
+
+Mocks help us create fake versions of other functions and services.
+
+## Mocks for everyone!
+
+Many programming languages with robust testing libraries have a library to help you write your mocks.
+
+* Go - gomock, https://github.com/golang/mock
+* C++ - gMock, https://github.com/google/googletest
+* Java - mockito, https://site.mockito.org/
+* JavaScript - Jest has a built in `jest.mock()` function, https://jestjs.io/docs/mock-functions
+* Python
+   1. unittest.mock, https://docs.python.org/3/library/unittest.mock.html
+   2. pytest-mock, https://pypi.org/project/pytest-mock/
+   3. requests-mock, https://pypi.org/project/requests-mock/
+
+Today we'll focus on mocking HTTP requests with Python's requests-mock library.
+
+## General pattern of writing test case with mocks
+
+When writing a test case against a function that returns data:
+
+1. Define a variable holding your expected result from the function under test
+2. Register you mock, configure it to intercept calls to the service or other function and return an expected result
+3. Call your function under test (which should then call the mock)
+4. Assert that your function under test:
+   * called the service or other function properly
+   * returned the expected result
+
+## Example: manageritm api server and client
+
+manageritm is a package that helps manage multiple copies of a service on a remote system.
+
+```
+       -----                   --------        Services Running
+      |     |                 |        |       ----------------
+      | You |                 | Remote |              0
+      |     |                 |        |
+       -----                   --------
+       
+       -----                   --------        Services Running
+      |     |     /start      |        |       ----------------
+      | You |     ------>     | Remote |              1
+      |     |                 |        |
+       -----                   --------
+       
+       -----                   --------        Services Running
+      |     |     /start      |        |       ----------------
+      | You |     ------>     | Remote |              2
+      |     |                 |        |
+       -----                   --------
+       
+       -----                   --------        Services Running
+      |     |     /stop       |        |       ----------------
+      | You |     ------>     | Remote |              1
+      |     |                 |        |
+       -----                   --------
+```
+
+<!--
+#picture:
+#1. show box to represent remote system
+#2. send a start request to manageritm
+#3. new service is started
+#4. send a start request to manageritm
+#5. new service is started
+#6. send a stop request to manageritm
+#7. service is stopped
+-->
+
+
+### What does the API look like
+* `GET /client` - create a new client, returns back a `client_id`
+* `POST /<client_id>/proxy/start` - start the proxy process
+* `GET /<client_id>/proxy/status` - retrieve the proxy status
+* `POST /<client_id>/proxy/stop` - stop the proxy status
+
+### Let's try it out
+
+Install dependencies:
+```{bash}
+pip install manageritm gunicorn
+```
+
+Start the server:
+
+```{bash}
+gunicorn \
+  --bind 0.0.0.0:8000 \
+  --workers 1 \
+  --log-level debug \
+  "manageritm.app:main()"
+```
+
+Make requests, using CURL, to start a process:
+
+```{bash}
+$ curl -s -X GET http://localhost:8000/client | jq
+
+{
+  "client_id": "fac1591c-8451-4da6-8d92-98bdbf347d80",
+  "har": "./hars/dump-fac1591c-8451-4da6-8d92-98bdbf347d80.har",
+  "port": 5265,
+  "webport": 5281
+}
+
+$ curl -s -X POST \
+    http://localhost:8000/fac1591c-8451-4da6-8d92-98bdbf347d80/proxy/start \
+    | jq
+
+{
+  "status": null
+}
+
+$ curl -s -X GET \
+    http://localhost:8000/fac1591c-8451-4da6-8d92-98bdbf347d80/proxy/status \
+    | jq
+
+{
+  "status": null
+}
+```
+
+Make requests using the Python client library
+
+```{python}
+import manageritm
+
+manageritm_addr = "localhost"
+manageritm_port = "8000"
+
+# create a manageritm client
+mc = manageritm.client.ManagerITMClient(
+  f'http://{manageritm_addr}:{manageritm_port}')
+proxy_details = mc.client()
+
+print(f"proxy port: {proxy_details['port']}")
+print(f"proxy webport: {proxy_details['webport']}")
+
+# start a proxy server
+mc.proxy_start()
+
+# set your application to use the proxy
+#  host: "localhost"
+#  port: f"{proxy_details['port']}"
+
+# do some work...
+
+# stop the proxy server
+mc.proxy_stop()
+```
+
+### Write test cases to test the Python client library
+
+We'll focus on the `GET /client` end point.
+```{bash}
+curl -s -X GET "http://localhost:8000/client" | jq
+```
+
+or in Python
+```{python}
+proxy_details = mc.client()
+```
+
+Start by writing up our boilerplate code:
+
+```{python}
+import pytest
+import uuid
+
+from manageritm.client import ManagerITMClient
+
+
+class TestClient:
+    ...
+```
+
+Add a test case, use the `requests_mock` fixture to setup the mocking library:
+
+```{python}
+import pytest
+import uuid
+
+from manageritm.client import ManagerITMClient
+
+
+class TestClient:
+
+    def test_get_client_default_ports(self, requests_mock):
+        base_uri = "https://localhost:5000"
+
+```
+
+There are 4 things I try to remember when writing a unit test with mocks:
+
+1. define a variable holding your expected result from the function under test
+2. register you mock, configure it to intercept calls to the service or other function and return an expected result
+3. call your function under test (which should then call the mock)
+4. assert that your function under test:
+   * called the service or other function properly
+   * returned the expected result
+
+First, define a variable holding your expected result
+
+```{python}
+    def test_get_client_default_ports(self, requests_mock):
+        base_uri = "https://localhost:5000"
+        expected_status = 200
+        expected_data = {'client_id': str(uuid.uuid4())}
+```
+
+Second, register you mock, configure it to intercept calls to the service return an expected result
+
+```{python}
+    def test_get_client_default_ports(self, requests_mock):
+        base_uri = "https://localhost:5000"
+        expected_status = 200
+        expected_data = {'client_id': str(uuid.uuid4())}
+
+        requests_mock.get(
+          f"{base_uri}/client",
+          status_code=expected_status,
+          json=expected_data
+        )
+```
+
+In this example, we'll need to define a second mock, because the `/client` end point also calls the function for the `/status` end point under the hood.
+
+```{python}
+    def test_get_client_default_ports(self, requests_mock):
+        base_uri = "https://localhost:5000"
+        expected_status = 200
+        expected_data = {'client_id': str(uuid.uuid4())}
+
+        requests_mock.get(
+          f"{base_uri}/client",
+          status_code=expected_status,
+          json=expected_data
+        )
+        requests_mock.get(
+          f"{base_uri}/{expected_data['client_id']}/proxy/status",
+          status_code=200,
+          json={'status': None}
+        )
+```
+
+Third, call your function under test, `client()`
+
+```python
+    def test_get_client_default_ports(self, requests_mock):
+        base_uri = "https://localhost:5000"
+        expected_status = 200
+        expected_data = {'client_id': str(uuid.uuid4())}
+
+        requests_mock.get(
+          f"{base_uri}/client",
+          status_code=expected_status,
+          json=expected_data
+        )
+        requests_mock.get(
+          f"{base_uri}/{expected_data['client_id']}/proxy/status",
+          status_code=200,
+          json={'status': None}
+        )
+
+        client = ManagerITMClient(self.base_uri)
+        actual_data = client.client()
+```
+
+Fourth, assert that the function under test made the correct calls and returned the correct data
+
+```{python}
+    def test_get_client_default_ports(self, requests_mock):
+        base_uri = "https://localhost:5000"
+        expected_status = 200
+        expected_data = {'client_id': str(uuid.uuid4())}
+
+        requests_mock.get(
+          f"{base_uri}/client",
+          status_code=expected_status,
+          json=expected_data
+        )
+        requests_mock.get(
+          f"{base_uri}/{expected_data['client_id']}/proxy/status",
+          status_code=200,
+          json={'status': None}
+        )
+
+        client = ManagerITMClient(self.base_uri)
+        actual_data = client.client()
+
+        assert actual_data == expected_data
+        assert client._uri == self.base_uri
+        assert client._client_id == expected_data['client_id']
+```
+
+<!--
+#show picture of our test case with the mock.
+#we program the mock service to return specific information
+#we then call our function under test.
+#the function under test make a request
+#the request is intercepted by the mock service
+#the mock service returns the programmed data to the function under test
+#the function under test receives the response, processes it, and returns data to the caller.
+-->
+
+
+Let's write another test!
+
+could also send `port` and `webport` parameters to client end point
+```{bash}
+curl -s -X GET "http://localhost:8000/client?port=5200&webport=5201" | jq
+```
+
+or in python
+```{python}
+proxy_details = mc.client(port=5200, webport=5201)
+```
+
+This test case will look similar to the last, but we will adjust our `expected_data` to show a specific port and web           port, and when we call the function under test, we will pass in the specific port and web port.
+
+```{python}
+    def test_get_client_set_port_and_webport(self, requests_mock):
+        base_uri = "https://localhost:5000"
+        expected_status = 200
+        expected_data = {
+            'client_id': str(uuid.uuid4()),
+            'port': 5200,
+            'webport': 5201,
+        }
+
+
+        requests_mock.get(
+          f"{base_uri}/client?port=5200&webport=5201",
+          status_code=expected_status,
+          json=expected_data
+        )
+        requests_mock.get(
+          f"{base_uri}/{expected_data['client_id']}/proxy/status",
+          status_code=200,
+          json={'status': None}
+        )
+
+        client = ManagerITMClient(self.base_uri)
+        actual_data = client.client(port=5200, webport=5201)
+
+        assert actual_data == expected_data
+        assert client._uri == self.base_uri
+        assert client._client_id == expected_data['client_id']
+```
